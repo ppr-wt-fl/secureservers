@@ -1,0 +1,29 @@
+# S0 and S1 from one image, each with its own state volume (S0's model and history, MP-SPDZ's persistence).
+services:
+  s0:
+    build: .
+    image: epprfl
+    command: uvicorn s0:app --host 0.0.0.0 --port 8000
+    ports: ["8000:8000"]
+    # party 0 has to reach its own MP-SPDZ port under the name party 1 uses
+    environment:
+      S0_HOST: s0
+      S1_TOKEN: ${S1_TOKEN:?set S1_TOKEN to a shared secret for S0 and S1}
+    volumes:
+      - s0-state:/usr/src/MP-SPDZ/Persistence
+      - ${MODEL_DIR:-../../extension/master/src/model/adflush}:/model:ro
+  s1:
+    build: .
+    image: epprfl
+    command: uvicorn s1:app --host 0.0.0.0 --port 8001
+    ports: ["8001:8001"]
+    environment:
+      S0_URL: http://s0:8000
+      S0_HOST: s0
+      S1_TOKEN: ${S1_TOKEN:?set S1_TOKEN to a shared secret for S0 and S1}
+      ROUND_SECONDS: ${ROUND_SECONDS:-600}
+    volumes:
+      - s1-state:/usr/src/MP-SPDZ/Persistence
+volumes:
+  s0-state:
+  s1-state:

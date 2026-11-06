@@ -1,0 +1,37 @@
+# compare.py against S0 and S1 over HTTP: export writes fedavg's model as S0's first model, compare is the clients
+# and the oracle (mltest/oracle).
+# Run with mltest/run.sh: ATTACKERS=80 of the 200 clients (ATTACKERS_LIST="0 80" for both), each from fresh state,
+# results in mltest/results.
+x-mltest: &mltest
+  build: mltest
+  image: epprfl-mltest
+  volumes:
+    - .:/app:ro
+    - mltest-model:/model
+    - ./mltest/results:/results
+  environment:
+    RESULTS: /results
+    S0_URL: http://s0:8000
+    S1_URL: http://s1:8001
+    N_ROUNDS: ${N_ROUNDS:-50}
+    CLIENTS_PER_ROUND: ${CLIENTS_PER_ROUND:-200}
+    ATTACKERS: ${ATTACKERS:-0}
+    UPLOAD_MARGIN_S: ${UPLOAD_MARGIN_S:-45}
+services:
+  export:
+    <<: *mltest
+    command: python mltest/compare.py export /model
+  compare:
+    <<: *mltest
+    command: python mltest/compare.py
+    # the results belong to the host user
+    user: ${HOST_UID:-1000}:${HOST_GID:-1000}
+    depends_on: [s0, s1]
+  s0:
+    depends_on: {export: {condition: service_completed_successfully}}
+    volumes: [mltest-model:/model:ro]
+  s1:
+    environment:
+      ROUND_SECONDS: ${ROUND_SECONDS:-120}
+volumes:
+  mltest-model:

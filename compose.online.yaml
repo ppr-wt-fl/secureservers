@@ -1,0 +1,15 @@
+# Online-only timings: the INSECURE build reads fake preprocessing (-F) from a volume both parties share; their
+# input and output files there are per player. Generate it once before the round, see README.
+services:
+  s0:
+    build: {context: ., args: {insecure: 1}}
+    image: epprfl-insecure
+    environment: {MPSPDZ_FLAGS: -F}
+    volumes: [prep:/usr/src/MP-SPDZ/Player-Data]
+  s1:
+    build: {context: ., args: {insecure: 1}}
+    image: epprfl-insecure
+    environment: {MPSPDZ_FLAGS: -F}
+    volumes: [prep:/usr/src/MP-SPDZ/Player-Data]
+volumes:
+  prep:

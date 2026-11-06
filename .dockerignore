@@ -1,0 +1,2 @@
+# the servers copy their files explicitly; keeps the evaluation data out of the build context
+mltest/

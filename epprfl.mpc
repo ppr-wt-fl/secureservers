@@ -1,0 +1,127 @@
+# EPPRFL filtering & clipping (Li et al., TIFS 2024, Sec. V-A) on S0/S1's additive shares, matching the plaintext
+# oracle robustness-evaluation/poisoning-eval/epprfl.py. Compile: ./compile.py -M -R 64 epprfl <N> <P> <K>
+# (N clients, P coordinates, K = |R_idx|). Every value is an integer at scale 2^20 (F).
+#
+# Binary inputs (int64), client order fixed by S1's arrived list:
+#   P0: L_i[R_idx] for each i, then D_h on R_idx, then L_i for each i
+#   P1: share_i[R_idx] for each i, then share_i for each i
+# Output to P0 only (Player-Data/Binary-Output-P0-0, int64): N benign bits, and unless none is benign, N clipped bits
+# and the sum of the clipped benign updates at scale 2^40 (P0 divides by 2^40 and the benign count).
+# State in Persistence/Transactions-P<i>.data at position 0: m_h, sum of the benign medians, number of medians, and
+# whether m_h is set.
+
+N, P, K = (int(arg) for arg in program.args[1:4])
+F = 20
+# robustness-evaluation's thesis grid; the paper has 0.05
+LAMBDA = 0.005
+# |d_i - m_h| below this keeps (d_i - m_h)^2 at scale 2^40 under 2^63; above it, the client fails the filter anyway
+# while lambda * m_h < 2^22
+DIFF_BOUND = 2 ** (11 + F)
+# replaces the distance of clients outside the benign set, so they sort last
+BIG = 2 ** 50
+
+# semi2k's local truncation only works for k <= 24 on a 64-bit ring, so truncation uses edaBits; nearest rounding
+# avoids the leakage of probabilistic truncation (eprint 2024/1127)
+program.use_trunc_pr = False
+sfix.round_nearest = True
+sfix.set_precision(F, 44)
+
+
+def read(player, size):
+    return sint.get_input_from(player, binary=True, n_bytes=8, size=size)
+
+
+def ratio(m, d):
+    """floor(m * 2^F / d) for 0 <= m < d by long division: sfix division needs k + 2F <= 64, too few integer bits."""
+    q, r = 0, m
+    for j in range(F):
+        r = 2 * r
+        bit = r >= d
+        r -= bit * d
+        q = 2 * q + bit
+    return q
+
+
+def median(values, n):
+    """np.median of the first n of the sorted values: the mean of the two middle ones when n is even."""
+    s = values.same_shape()
+    s.assign(values)
+    s.sort()
+    n = regint(n)
+    return ((sfix._new(s[(n - 1) >> 1]) + sfix._new(s[n >> 1])) * 0.5).v
+
+
+distances = sint.Array(N)
+sampled = [read(0, K) + read(1, K) for i in range(N)]
+history = read(0, K)
+for i in range(N):
+    diff = sampled[i] - history
+    distances[i] = sint.dot_product(diff, diff).round(63, F, nearest=True)
+
+# party.init_state writes zeros before the first round; whether m_h is set and the count are public
+_, stored = sint.read_from_file(0, 4)
+fresh = regint(stored[3].reveal()) == 0
+m_h = sint.Array(1)
+
+
+@if_e(fresh)
+def _():
+    m_h[0] = median(distances, N)
+
+
+@else_
+def _():
+    m_h[0] = stored[0]
+
+
+m = m_h[0]
+d = distances[:]
+diff = d - m
+in_range = (diff < DIFF_BOUND) * (diff > -DIFF_BOUND)
+benign = regint.Array(N)
+benign[:] = (in_range * (diff * diff < int(round(LAMBDA * 2 ** F)) * m)).reveal()
+n_benign = sum(benign[i] for i in range(N))
+benign[:].binary_output(0)
+
+
+@if_e(n_benign == 0)
+def _():
+    # the oracle keeps the first round's m_h when that round is skipped
+    @if_(fresh)
+    def _():
+        sint.write_to_file([m, sint(0), sint(0), sint(1)], position=0)
+
+
+@else_
+def _():
+    clipped = regint.Array(N)
+    clipped[:] = (cint(benign[:]) * (d > m)).reveal()
+    clipped[:].binary_output(0)
+
+    # for the clipped clients, d_i > m_h; the others' factors are garbage and unused
+    factors = sint.Array(N)
+    factors[:] = ratio(m.expand_to_vector(N), d)
+    total = sint.Array(P)
+    total.assign_all(0)
+    for i in range(N):
+        x = read(0, P) + read(1, P)
+
+        @if_e(clipped[i])
+        def _():
+            total[:] += x * factors[i].expand_to_vector(P)
+
+        @else_
+        def _():
+            @if_(benign[i])
+            def _():
+                total[:] += x * 2 ** F
+
+    total[:].reveal_to(0).binary_output()
+
+    # benign clients sort first, the median of their distances is the round's median
+    keys = sint.Array(N)
+    keys[:] = cint(benign[:]) * d + cint(1 - benign[:]) * BIG
+    count = regint(stored[2].reveal()) + 1
+    total_median = stored[1] + median(keys, n_benign)
+    new_m = (sfix._new(total_median) * (cfix(1) / cint(count))).v
+    sint.write_to_file([new_m, total_median, sint(count), sint(1)], position=0)
